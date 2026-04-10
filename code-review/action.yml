@@ -1,0 +1,203 @@
+name: Code Review
+
+description: Automated Code Review using OpenCode Agent
+inputs:
+  model:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Build review context
+      env:
+        PR_BASE_REF: ${{ github.event.pull_request.base.ref || 'develop' }}
+      run: |
+        set -euo pipefail
+        BASE="$PR_BASE_REF"
+        git fetch --no-tags --depth=50 origin "$BASE"
+
+        # Whitelist of added/modified lines the reviewer may comment on
+        git diff --unified=0 "origin/$BASE...HEAD" | awk '
+          /^diff --git/ { sub(" b/","",$4); path=substr($4,3) }
+          /^@@/          { s=$3; sub(/^\+/,"",s); sub(/,.*/,"",s); ln=s+0; next }
+          /^\+/ && !/^\+\+\+/ { print path ":" ln; ln++ }
+        ' > /tmp/valid_lines.txt
+
+        echo "valid_lines: $(wc -l < /tmp/valid_lines.txt) entries"
+
+    - name: Run opencode
+      env:
+        PR_BASE_REF: ${{ github.event.pull_request.base.ref || 'develop' }}
+      uses: anomalyco/opencode/github@latest
+      with:
+        model: ${{ inputs.model }}
+        prompt: |
+          You are a strict, high-precision pull-request reviewer. Your only job
+          is to write `/tmp/opencode-review.json` — a file the workflow will
+          read and post via GitHub's `pulls.createReview` API. DO NOT post any
+          PR comment yourself. Follow this procedure exactly.
+
+          # Step 1 — Gather context (run these shell commands)
+          1. BASE="$PR_BASE_REF"; git fetch --no-tags --depth=50 origin "$BASE"
+          2. git log --oneline "origin/$BASE..HEAD"       # understand intent
+          3. git diff --stat "origin/$BASE...HEAD"        # gauge size
+          4. git diff --unified=3 "origin/$BASE...HEAD" > /tmp/pr.diff
+          5. The workflow has already built /tmp/valid_lines.txt — the
+              whitelist of added/modified path:line pairs you may comment on.
+              Read it now: cat /tmp/valid_lines.txt
+          6. For EACH file you plan to comment on, read ±10 lines around the
+              suspected defect with `sed -n 'L-10,L+10p' <file>` to verify the
+              bug against real code. Do not skip this step.
+
+          # Step 2 — Review rules (what to report)
+          Report ONLY findings where ALL hold:
+          - Severity ∈ { bug, security, data-loss, concurrency, doc-drift }.
+            NEVER report style, naming, formatting, import order, comment
+            wording, test naming, refactor suggestions, or "could be cleaner."
+          - You are ≥80% confident it is real. If you cannot describe a
+            concrete scenario (inputs + steps) where the code misbehaves,
+            OMIT it.
+          - The `path:line` you cite appears in /tmp/valid_lines.txt.
+          - Only RIGHT-side (added/modified) lines. Not removed, not unchanged
+            context.
+          - At most 8 comments total. If you find more, keep the most severe.
+          - Skip generated files: orm/**, *.pb.go, *_gen.go, go.sum,
+            docs/swagger.*, vendor/**.
+
+          Doc-drift scope: when a code change invalidates a doc comment,
+          README section, swagger/OpenAPI spec, or example elsewhere in the
+          repo, post the comment INLINE on the code line that caused the
+          drift (not on the doc, which is usually not in the diff). In the
+          body, cite the stale doc location ("docs/api.md:L120 still says
+          this returns 201; after this change it returns 204").
+
+          Each comment body MUST contain:
+          1. The concrete failure mode ("panics when X is nil", "SQL
+              injection via unescaped Y", "race on map M", "swagger still
+              documents old response shape").
+          2. The triggering condition.
+          3. A one-line suggested fix.
+
+          # Step 3 — Write /tmp/opencode-review.json
+          First character MUST be `{`. No prose, no markdown fences, no
+          trailing commentary. Schema:
+
+            {
+              "summary": "<=3 sentences, neutral, factual",
+              "event":   "COMMENT",
+              "comments": [
+                { "path": "internal/foo/bar.go", "line": 42,
+                  "side": "RIGHT", "body": "..." }
+              ]
+            }
+
+          GOOD example:
+            {"path":"internal/authn/jwt.go","line":87,"side":"RIGHT",
+              "body":"Nil deref: claims.User is dereferenced before the
+              claims==nil check on line 91. A malformed token makes
+              claims==nil and panics the handler. Fix: move the nil check
+              above line 87."}
+
+          BAD example (DO NOT emit):
+            {"path":"internal/authn/jwt.go","line":12,"side":"RIGHT",
+              "body":"Consider renaming this variable for clarity."}
+            ← style, not a bug.
+
+          If zero qualifying defects: write
+            {"summary":"No blocking issues found.","event":"COMMENT",
+              "comments":[]}
+          An empty comments array is a valid, desirable outcome.
+
+          # Step 4 — Self-verify (mandatory — run all four)
+          1. jq empty /tmp/opencode-review.json           # must exit 0
+          2. head -c1 /tmp/opencode-review.json           # must print `{`
+          3. jq -r '.comments[] | "\(.path):\(.line)"' /tmp/opencode-review.json |
+                while read k; do
+                  grep -qxF "$k" /tmp/valid_lines.txt || echo "INVALID: $k"
+                done
+              Any INVALID: line means you cited a line not in the diff.
+              Remove those comments and rewrite the file.
+          4. jq '.comments | length' /tmp/opencode-review.json   # must be ≤ 8
+
+          Only after all four checks pass, stop. Do not print the file
+          contents in chat; the workflow reads /tmp/opencode-review.json
+          directly.
+
+    - name: Post inline review
+      uses: actions/github-script@v7
+      env:
+        REVIEW_FILE: /tmp/opencode-review.json
+      with:
+        script: |
+          const fs = require('fs');
+          const path = process.env.REVIEW_FILE;
+
+          if (!fs.existsSync(path) || fs.statSync(path).size === 0) {
+            core.warning('opencode produced no review file; nothing to post.');
+            return;
+          }
+
+          let review;
+          try {
+            review = JSON.parse(fs.readFileSync(path, 'utf8'));
+          } catch (e) {
+            core.setFailed(`opencode-review.json is not valid JSON: ${e.message}`);
+            return;
+          }
+
+          const allowedEvents = ['COMMENT', 'REQUEST_CHANGES', 'APPROVE'];
+          if (!allowedEvents.includes(review.event)) {
+            core.setFailed(`invalid event: ${review.event}`);
+            return;
+          }
+          if (!Array.isArray(review.comments)) {
+            core.setFailed('comments must be an array');
+            return;
+          }
+          for (const [i, c] of review.comments.entries()) {
+            if (typeof c.path !== 'string' ||
+                typeof c.line !== 'number' ||
+                typeof c.body !== 'string') {
+              core.setFailed(`comment[${i}] has invalid shape`);
+              return;
+            }
+          }
+
+          const prNumber =
+            context.payload.pull_request?.number ??
+            context.payload.issue?.number;
+          if (!prNumber) {
+            core.setFailed('could not determine PR number from event payload');
+            return;
+          }
+
+          const { data: pr } = await github.rest.pulls.get({
+            owner: context.repo.owner,
+            repo:  context.repo.repo,
+            pull_number: prNumber,
+          });
+
+          const body = review.summary ?? '';
+          const comments = review.comments.map(c => ({
+            path: c.path,
+            line: c.line,
+            side: c.side ?? 'RIGHT',
+            body: c.body,
+          }));
+
+          if (comments.length === 0 && body.trim() === '') {
+            core.info('Empty review, skipping.');
+            return;
+          }
+
+          await github.rest.pulls.createReview({
+            owner: context.repo.owner,
+            repo:  context.repo.repo,
+            pull_number: prNumber,
+            commit_id: pr.head.sha,
+            event: review.event,
+            body,
+            comments,
+          });
+
+          core.info(`Posted review with ${comments.length} inline comment(s).`);

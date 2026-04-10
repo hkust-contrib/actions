@@ -1,4 +1,4 @@
-# Imprint GitHub Action
+# Authenticate GitHub Action
 
 This GitHub Action authenticates itself to a Security Token Service API running on Cloudflare Workers
 ```yml
