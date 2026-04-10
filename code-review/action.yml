@@ -9,6 +9,7 @@ runs:
   using: composite
   steps:
     - name: Build review context
+      shell: bash
       env:
         PR_BASE_REF: ${{ github.event.pull_request.base.ref || 'develop' }}
       run: |
