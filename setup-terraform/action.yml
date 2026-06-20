@@ -31,7 +31,7 @@ runs:
   using: "composite"
   steps:
     - name: Configure Terraform backend and credentials
-      uses: actions/github-script@v8
+      uses: actions/github-script@v9
       with:
         script: |
           const token = '${{ inputs.use_federated_token }}'.length > 0 ? process.env.FEDERATED_TOKEN:await core.getIDToken();
