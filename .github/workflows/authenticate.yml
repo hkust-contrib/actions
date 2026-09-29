@@ -23,7 +23,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      # Required input not supplied; the runner must reject the step.
+      # The runner does not enforce required inputs for composite actions
+      # (actions/runner#1070): org arrives empty and must be rejected by the
+      # action's own validation before any token is requested or sent.
       - name: Run action without org
         id: smoke
         uses: ./authenticate
