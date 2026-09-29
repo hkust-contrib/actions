@@ -1,0 +1,84 @@
+name: Smoke Test authenticate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'authenticate/**'
+      - '.github/workflows/authenticate.yml'
+  pull_request:
+    paths:
+      - 'authenticate/**'
+      - '.github/workflows/authenticate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  missing-org:
+    name: missing org input fails
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # Required input not supplied; the runner must reject the step.
+      - name: Run action without org
+        id: smoke
+        uses: ./authenticate
+        continue-on-error: true
+
+      - name: Assert action failed
+        if: steps.smoke.outcome != 'failure'
+        run: |
+          echo "::error::authenticate should fail without the org input, got outcome '${{ steps.smoke.outcome }}'"
+          exit 1
+
+  invalid-org:
+    name: malformed org input fails validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # Fails at input validation before any token is requested or sent.
+      - name: Run action with malformed org
+        id: smoke
+        uses: ./authenticate
+        with:
+          org: 'not a uuid!'
+        continue-on-error: true
+
+      - name: Assert action failed
+        if: steps.smoke.outcome != 'failure'
+        run: |
+          echo "::error::authenticate should fail on a malformed org input, got outcome '${{ steps.smoke.outcome }}'"
+          exit 1
+
+  unknown-org:
+    name: unknown org fails gracefully
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # No workload identities exist for this org; the exchange must return
+      # invalid_grant and the action must fail gracefully, not crash.
+      - name: Run action against a nonexistent org
+        id: smoke
+        uses: ./authenticate
+        with:
+          org: '00000000-0000-0000-0000-000000000000'
+          scope: 'smoke'
+          audience: 'https://smoke.invalid'
+        continue-on-error: true
+
+      - name: Assert action failed
+        if: steps.smoke.outcome != 'failure'
+        run: |
+          echo "::error::authenticate should fail for an unknown org, got outcome '${{ steps.smoke.outcome }}'"
+          exit 1
