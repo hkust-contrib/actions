@@ -36,6 +36,7 @@ runs:
   steps:
     - id: exchange
       uses: actions/github-script@v8
+      # WLIF_* — workload identity federation inputs relayed to the exchange script.
       env:
         WLIF_ENDPOINT: ${{ inputs.endpoint }}
         WLIF_ORG: ${{ inputs.org }}
@@ -46,7 +47,7 @@ runs:
         script: |
           const endpoint = process.env.WLIF_ENDPOINT.replace(/\/+$/, '');
           const org = (process.env.WLIF_ORG ?? '').trim();
-          if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(org)) {
+          if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(org)) {
             core.setFailed(`Invalid org input '${process.env.WLIF_ORG ?? ''}': expected the organization ID (a UUID) as shown in the Wayport admin UI of ${endpoint}`);
             return;
           }

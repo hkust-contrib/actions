@@ -6,19 +6,24 @@ Forked from [`tailscale/github-action`](https://github.com/tailscale/github-acti
 
 ## What's different
 
-Upstream's workload-identity path always requests the OIDC token from the runner itself via `core.getIDToken()`, which only works for GitHub's job-scoped token (~5 minute lifetime). This fork adds an **`id-token`** input: when set, the token is passed through to `tailscale up --id-token` directly and no runner OIDC request is made. This lets you authenticate with a token minted by any identity provider your tailnet trusts — for example one exchanged by [`imprint`](../imprint), which is valid for 1 hour instead of GitHub's ~5 minutes:
+Upstream's workload-identity path always requests the OIDC token from the runner itself via `core.getIDToken()`, which only works for GitHub's job-scoped token (~5 minute lifetime). This fork adds an **`id-token`** input: when set, the token is passed through to `tailscale up --id-token` directly and no runner OIDC request is made. This lets you authenticate with a token minted by any identity provider your tailnet trusts — for example one exchanged by [`authenticate`](../authenticate), valid for the workload identity's configured TTL instead of GitHub's ~5 minutes:
 
 ```yml
-steps:
-  - uses: narwhl/actions/imprint@latest
-    with:
-      scope: tailscale
+permissions:
+  id-token: write
 
-  - uses: narwhl/actions/connect-tailscale@latest
+steps:
+  - uses: hkust-contrib/actions/authenticate@latest
+    id: authenticate
+    with:
+      org: ${{ vars.WAYPORT_ORG_ID }}
+      audience: ${{ vars.TAILSCALE_AUDIENCE }}
+
+  - uses: hkust-contrib/actions/connect-tailscale@latest
     with:
       oauth-client-id: ${{ vars.TAILSCALE_CLIENT_ID }}
       tags: tag:ci
-      id-token: ${{ env.FEDERATED_TOKEN }}
+      id-token: ${{ steps.authenticate.outputs.access_token }}
 ```
 
 When `id-token` is omitted, behavior is identical to upstream: provide `audience` + `oauth-client-id` + `tags` (token requested from the runner), `oauth-secret` + `tags`, or a classic `authkey`. The `audience` input is not required with `id-token` — Tailscale validates the token's `aud` claim server-side against the OIDC identity configuration. The default installed version is refreshed periodically and may differ from upstream's.
@@ -28,7 +33,7 @@ When `id-token` is omitted, behavior is identical to upstream: provide `audience
 | Input | Description | Default |
 | --- | --- | --- |
 | `oauth-client-id` | Tailscale OAuth or OIDC federated identity client ID. | |
-| `id-token` | Federated OIDC ID token from an external provider; skips the runner OIDC request. | |
+| `id-token` | Federated OIDC ID token from an external provider; skips the runner OIDC request. Requires Tailscale ≥ 1.90.0. | |
 | `audience` | Audience for the runner-requested OIDC token. Ignored when `id-token` is set. | |
 | `oauth-secret` | Tailscale OAuth client secret. | |
 | `tags` | Comma-separated tags applied to the node (required for OAuth/federated auth). | |
